@@ -1,0 +1,63 @@
+.TH PANEL 1 "October 2026" "ServerPanel 1.0" "System Administration"
+.SH NAME
+panel \- terminal administration panel for Debian 13
+.SH SYNOPSIS
+.B sudo panel
+.br
+.B panel motd
+.br
+.B panel --version
+.SH DESCRIPTION
+.B panel
+is a keyboard-first terminal interface for systemd services, Apache
+VirtualHosts and host metrics. Interactive administration requires root.
+No web interface or extra network port is required.
+.SH KEYS
+.TP
+.B LEFT / RIGHT
+Switch section; move between the actions of the selected item.
+.TP
+.B UP / DOWN
+Select a service, site or action.
+.TP
+.B ENTER
+Focus the action pane, then run the selected action.
+.TP
+.B TAB
+Move focus between the list and the actions.
+.TP
+.B 1 / 2 / 3
+Jump to SERVICES, VPS or SITES.
+.TP
+.B ESC
+Return to the list or close a dialog.
+.TP
+.B N
+Create a service or site, depending on the section.
+.TP
+.B A
+Show all systemd units or only the followed ones.
+.TP
+.B R
+Refresh inventories and metrics.
+.TP
+.B Q
+Quit.
+.SH FILES
+.I /etc/serverpanel/config.json
+.br
+.I /etc/update-motd.d/85-serverpanel
+.br
+.I /etc/systemd/system/panel-*.service
+.br
+.I /etc/apache2/sites-available/panel-*.conf
+.SH SECURITY
+Application processes run under dedicated unprivileged system users.
+No administrative command is executed via a shell. Critical networking/SSH
+units are protected from stop/disable operations. Use the system console for
+emergency maintenance. Always back up the server before large changes.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR apache2ctl (8),
+.BR certbot (7),
+.BR journalctl (1)

@@ -1,0 +1,4 @@
+#!/bin/sh
+# pam_motd executes this read-only script during SSH login.
+[ -x /usr/bin/panel ] || exit 0
+exec /usr/bin/panel motd
