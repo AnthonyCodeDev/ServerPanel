@@ -66,6 +66,11 @@ class Panel:
         self.win.keypad(True)
         curses.noecho()
         curses.cbreak()
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+            curses.mouseinterval(0)
+        except (AttributeError, curses.error):
+            pass
         if curses.has_colors():
             try:
                 curses.start_color()
@@ -198,13 +203,16 @@ class Panel:
                 result.append(('SUPPRIMER', 'remove'))
             return result
         if self.tab == 2:
-            result = [('NOUVEAU', 'new')]
-            if rows:
-                item = rows[min(self.index, len(rows) - 1)]
-                if item.managed:
-                    result += [('ACTIVER' if not item.enabled else 'DÉSACTIVER', 'toggle'),
-                               ('HTTPS', 'https'), ('LOGS', 'logs'),
-                               ('SUPPRIMER', 'remove')]
+            rows = self.rows()
+            if not rows:
+                return []
+            item = rows[min(self.index, len(rows) - 1)]
+            if not item.managed:
+                return []
+            result = [('ACTIVER' if not item.enabled else 'DÉSACTIVER', 'toggle'),
+                      ('HTTPS' if not item.https else 'HTTPS OK', 'https'),
+                      ('LOGS', 'logs'),
+                      ('SUPPRIMER', 'remove')]
             return result
         return []
 
@@ -279,7 +287,11 @@ class Panel:
             self.render_message(height, width)
             self.win.refresh()
             return
-        side_width = 26 if width >= 110 else 24 if width >= 80 else 22
+        if self.tab == 2:
+            list_min = 28
+            side_width = max(36, width - list_min - 4)
+        else:
+            side_width = 26 if width >= 110 else 24 if width >= 80 else 22
         side_x = width - side_width - 2
         separator = side_x - 2
         actions = self.actions()
@@ -290,18 +302,64 @@ class Panel:
         self.render_list(rows, height, separator)
         for row in range(4, height - 1):
             self.put(row, separator, '│', self.colors.dim)
-        self.render_actions(actions, height, side_x, side_width)
+        if self.tab == 2:
+            self.render_site_sidebar(actions, height, side_x, side_width)
+        else:
+            self.render_actions(actions, height, side_x, side_width)
         self.render_message(height, width)
         self.win.refresh()
 
-    def render_list(self, rows: list, height: int, separator: int):
-        visible = max(1, height - 5)
-        total = len(rows)
-        self.scroll = max(0, min(self.scroll, max(0, total - 1)))
+    def list_visible(self, height: int | None = None) -> int:
+        if height is None:
+            height = self.win.getmaxyx()[0]
+        return max(1, height - 5)
+
+    def clamp_list_scroll(self, total: int, visible: int):
+        max_scroll = max(0, total - visible)
+        self.scroll = max(0, min(self.scroll, max_scroll))
         if self.index >= self.scroll + visible:
-            self.scroll = self.index - visible + 1
+            self.scroll = min(max_scroll, self.index - visible + 1)
         if self.index < self.scroll:
             self.scroll = self.index
+
+    def scroll_list(self, delta: int):
+        if self.tab == 1 or not delta:
+            return
+        rows = self.rows()
+        total = len(rows)
+        if total <= 0:
+            return
+        visible = self.list_visible()
+        max_scroll = max(0, total - visible)
+        self.scroll = max(0, min(max_scroll, self.scroll + delta))
+        if self.index < self.scroll:
+            self.index = self.scroll
+        elif self.index >= self.scroll + visible:
+            self.index = min(total - 1, self.scroll + visible - 1)
+
+    def mouse_wheel_delta(self, key) -> int:
+        if key in (getattr(curses, 'KEY_SR', -999),):
+            return -1
+        if key in (getattr(curses, 'KEY_SF', -998),):
+            return 1
+        if key != curses.KEY_MOUSE:
+            return 0
+        try:
+            _id, _x, _y, _z, bstate = curses.getmouse()
+        except (curses.error, AttributeError, TypeError, ValueError):
+            return 0
+        if bstate & getattr(curses, 'BUTTON_SHIFT', 0):
+            return 0
+        if bstate & curses.BUTTON4_PRESSED:
+            return -1
+        if bstate & getattr(curses, 'BUTTON5_PRESSED', 0x00200000):
+            return 1
+        return 0
+
+    def render_list(self, rows: list, height: int, separator: int):
+        visible = self.list_visible(height)
+        total = len(rows)
+        self.clamp_list_scroll(total, visible)
         if not rows:
             label = 'AUCUN SERVICE' if self.tab == 0 else 'AUCUN SITE'
             self.center(4 + max(0, (visible - 2) // 2), label, self.colors.dim)
@@ -402,6 +460,79 @@ class Panel:
         else:
             label, color = 'OFF', self.colors.bad
         self.put(y, status_x, f'{label:>5}', color, True)
+
+    def render_site_sidebar(self, actions: list[tuple[str, str]], height: int, x: int, width: int):
+        inner = max(8, width - 1)
+        title_style = self.colors.selected if self.focus == 'actions' else self.colors.blue
+        self.put(4, x, 'ACTIONS', title_style, True)
+        if actions and self.focus != 'actions':
+            self.put(4, x + 8, '⏎', self.colors.dim)
+        y = 5
+        if actions:
+            col = x
+            limit = x + inner
+            for index, (label, key) in enumerate(actions):
+                chip = f'[{label}]'
+                if col > x and col + len(chip) > limit:
+                    y += 1
+                    col = x
+                if key == 'remove':
+                    color = self.colors.bad
+                elif key == 'https':
+                    color = self.colors.good if label == 'HTTPS OK' else self.colors.warning
+                else:
+                    color = self.colors.normal
+                if self.focus == 'actions' and index == self.action_index:
+                    color = self.colors.selected
+                self.put(y, col, chip[:inner], color, True)
+                col += len(chip) + 1
+            y += 2
+        elif not self.rows():
+            self.put(y, x, 'Aucun site', self.colors.dim)
+            y += 2
+        else:
+            self.put(y, x, 'Lecture seule', self.colors.dim)
+            y += 2
+        self.render_site_config(height, x, width, start_y=y)
+
+    def render_site_config(self, height: int, x: int, width: int, start_y: int = 4):
+        inner = max(8, width - 1)
+        self.put(start_y, x, 'APACHE', self.colors.blue, True)
+        rows = self.rows()
+        if not rows:
+            return
+        item = rows[min(self.index, len(rows) - 1)]
+        shown = item.filename
+        if item.https:
+            shown = f'{item.filename} + ssl'
+        self.put(start_y, x + 7, shorten(shown, max(1, inner - 7)), self.colors.dim)
+        try:
+            text = sites.config_text(item)
+        except PanelError as exc:
+            self.put(start_y + 2, x, shorten(str(exc), inner), self.colors.bad)
+            return
+        wrapped: list[str] = []
+        for raw in text.splitlines() or ['']:
+            line = raw.replace('\t', '    ')
+            if not line:
+                wrapped.append('')
+                continue
+            while len(line) > inner:
+                wrapped.append(line[:inner])
+                line = line[inner:]
+            wrapped.append(line)
+        y = start_y + 1
+        last = height - 2
+        room = max(1, last - y + 1)
+        if len(wrapped) > room:
+            shown = wrapped[:room - 1] + ['…']
+        else:
+            shown = wrapped[:room]
+        for line in shown:
+            if y > last:
+                break
+            self.put(y, x, line[:inner], self.colors.normal)
+            y += 1
 
     def render_actions(self, actions: list[tuple[str, str]], height: int, x: int, width: int):
         title_style = self.colors.selected if self.focus == 'actions' else self.colors.blue
@@ -540,7 +671,10 @@ class Panel:
                     self.put(y + 4, x + 3, '← →  ENTRÉE  ESC', self.colors.dim)
                 self.win.refresh()
                 key = self.win.getch()
-                if key in (curses.KEY_LEFT, ord('h')):
+                wheel = self.mouse_wheel_delta(key)
+                if wheel:
+                    cursor = max(0, min(len(options) - 1, cursor + wheel))
+                elif key in (curses.KEY_LEFT, ord('h')):
                     cursor = (cursor - 1) % len(options)
                 elif key in (curses.KEY_RIGHT, ord('l'), 9):
                     cursor = (cursor + 1) % len(options)
@@ -616,6 +750,8 @@ class Panel:
                     pos = 0
                 elif key == curses.KEY_END:
                     pos = len(buffer)
+                elif key == curses.KEY_MOUSE:
+                    self.mouse_wheel_delta(key)
                 elif isinstance(key, str) and key.isprintable() and len(buffer) < 200:
                     buffer.insert(pos, key)
                     pos += 1
@@ -668,9 +804,12 @@ class Panel:
                              self.colors.dim)
                 self.win.refresh()
                 key = self.win.getch()
+                wheel = self.mouse_wheel_delta(key)
                 if key in (27, ord('q'), ord('Q')):
                     return
-                if key in (curses.KEY_UP, ord('k')):
+                if wheel:
+                    offset += wheel
+                elif key in (curses.KEY_UP, ord('k')):
                     offset -= 1
                 elif key in (curses.KEY_DOWN, ord('j')):
                     offset += 1
@@ -875,10 +1014,11 @@ class Panel:
             return
         options: dict = {}
         if kind == 'STATIQUE':
-            path = self.prompt('DOSSIER WEB', f'/var/www/{domain}/public', 'sous /var/www/')
+            path = self.prompt('DOSSIER WEB', f'/var/www/{domain}/', 'sous /var/www/')
             if not path:
                 return
             options['path'] = path
+            options['htaccess'] = True
         else:
             port = self.prompt('PORT LOCAL', '3000', 'backend sur 127.0.0.1')
             if not port:
@@ -907,6 +1047,30 @@ class Panel:
                            success=f'HTTPS activé · {created.domain}')
 
     # ------------------------------------------------------------------- loop
+
+    def move_horizontal(self, delta: int):
+        if delta < 0:
+            if self.focus == 'actions':
+                if self.tab == 2 and self.action_index > 0:
+                    self.action_index -= 1
+                else:
+                    self.focus = 'list'
+            elif self.focus == 'tabs':
+                self.change_tab(-1)
+            return
+        if self.focus == 'tabs':
+            self.change_tab(1)
+            return
+        if self.focus == 'list' and self.tab != 1:
+            actions = self.actions()
+            if actions:
+                self.focus = 'actions'
+                self.action_index = 0
+            return
+        if self.focus == 'actions' and self.tab == 2:
+            count = len(self.actions())
+            if count:
+                self.action_index = min(count - 1, self.action_index + 1)
 
     def handle_enter(self):
         if self.focus == 'tabs':
@@ -941,23 +1105,18 @@ class Panel:
             if key == -1:
                 self.refresh_data()
                 continue
+            wheel = self.mouse_wheel_delta(key)
+            if wheel:
+                self.scroll_list(wheel)
+                continue
             if key in (ord('q'), ord('Q')):
                 return
             if key in (ord('1'), ord('2'), ord('3')):
                 self.set_tab(key - ord('1'))
             elif key in (curses.KEY_LEFT, ord('h')):
-                if self.focus == 'actions':
-                    self.focus = 'list'
-                elif self.focus == 'tabs':
-                    self.change_tab(-1)
+                self.move_horizontal(-1)
             elif key in (curses.KEY_RIGHT, ord('l')):
-                if self.focus == 'tabs':
-                    self.change_tab(1)
-                elif self.focus == 'list' and self.tab != 1:
-                    actions = self.actions()
-                    if actions:
-                        self.focus = 'actions'
-                        self.action_index = 0
+                self.move_horizontal(1)
             elif key in (curses.KEY_UP, ord('k')):
                 if self.focus == 'actions':
                     count = len(self.actions())

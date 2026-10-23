@@ -63,6 +63,25 @@ class Tests(unittest.TestCase):
         self.assertIn('ACTIF', joined)
         self.assertIn('ÉCHEC', joined)
 
+    def test_site_actions_navigate_with_arrows(self):
+        panel = self.get_panel()
+        panel.sites = [sites.Site('anthonyuno.be', 'panel-anthonyuno.be.conf',
+                                  '/var/www/anthonyuno', True, False, True, True)]
+        panel.set_tab(2)
+        panel.focus = 'list'
+        panel.move_horizontal(1)
+        self.assertEqual(panel.focus, 'actions')
+        self.assertEqual(panel.actions()[panel.action_index][1], 'toggle')
+        panel.move_horizontal(1)
+        self.assertEqual(panel.actions()[panel.action_index][1], 'https')
+        panel.move_horizontal(1)
+        self.assertEqual(panel.actions()[panel.action_index][1], 'logs')
+        panel.move_horizontal(-1)
+        self.assertEqual(panel.actions()[panel.action_index][1], 'https')
+        panel.move_horizontal(-1)
+        panel.move_horizontal(-1)
+        self.assertEqual(panel.focus, 'list')
+
     def test_enter_moves_focus_then_executes(self):
         panel = self.get_panel()
         panel.focus = 'list'
@@ -132,11 +151,20 @@ class Tests(unittest.TestCase):
         for label in ('SYSTÈME', 'RAM', 'DISK', 'UPTIME', 'SERVICES'):
             self.assertIn(label, joined)
         panel.set_tab(2)
-        panel.render()
+        vhost = '<VirtualHost *:80>\n    ServerName example.be\n    DocumentRoot "/var/www/example/"\n</VirtualHost>\n'
+        with mock.patch.object(ui.sites, 'config_text', return_value=vhost):
+            panel.render()
         joined = self.text(panel)
         self.assertIn('example.be', joined)
         self.assertIn('HTTPS', joined)
         self.assertIn('NOUVEAU', joined)
+        self.assertIn('APACHE', joined)
+        self.assertIn('panel-example.be.conf', joined)
+        self.assertIn('DocumentRoot', joined)
+        self.assertIn('DÉSACTIVER', joined)
+        self.assertIn('HTTPS', joined)
+        self.assertIn('LOGS', joined)
+        self.assertIn('SUPPRIMER', joined)
 
     def test_menu_keyboard(self):
         panel = self.get_panel()
@@ -176,6 +204,34 @@ class Tests(unittest.TestCase):
         panel = self.get_panel(45)
         panel.render()
         self.assertIn('TERMINAL TROP PETIT', self.text(panel))
+
+    def test_wheel_scroll_is_vertical_and_clamped(self):
+        panel = self.get_panel()
+        panel.win.h = 17
+        panel.services = [
+            services.Service(f'panel-svc{i}.service', 'active', 'enabled',
+                             fragment='/etc/systemd/system/panel-svc.service')
+            for i in range(40)
+        ]
+        visible = panel.list_visible()
+        max_scroll = max(0, 40 - visible)
+        self.assertGreater(max_scroll, 0)
+        with mock.patch.object(ui, 'pins', return_value=[]):
+            panel.scroll_list(-5)
+            self.assertEqual(panel.scroll, 0)
+            panel.scroll_list(1)
+            self.assertEqual(panel.scroll, 1)
+            self.assertGreaterEqual(panel.index, panel.scroll)
+            self.assertLess(panel.index, panel.scroll + visible)
+            panel.scroll_list(1000)
+            self.assertEqual(panel.scroll, max_scroll)
+            self.assertLess(panel.index, 40)
+            panel.scroll_list(-1000)
+            self.assertEqual(panel.scroll, 0)
+            self.assertEqual(panel.index, 0)
+        self.assertEqual(panel.mouse_wheel_delta(ui.curses.KEY_SR), -1)
+        self.assertEqual(panel.mouse_wheel_delta(ui.curses.KEY_SF), 1)
+        self.assertEqual(panel.mouse_wheel_delta(ord('j')), 0)
 
 
 if __name__ == '__main__':

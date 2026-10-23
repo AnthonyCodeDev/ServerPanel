@@ -27,10 +27,32 @@ class Validation(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(common.PanelError):
                 sites.validate_webroot(value)
 
+    def test_config_text_rejects_bad_filename(self):
+        site = sites.Site('example.be', '../evil.conf', '/var/www/example', True, False, True, True)
+        with self.assertRaises(common.PanelError):
+            sites.config_text(site)
+
+    def test_config_text_appends_ssl_companion(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            av = Path(dirname) / 'available'
+            av.mkdir()
+            site = sites.Site('example.be', 'panel-example.be.conf', '/var/www/example', True, True, True, False)
+            (av / site.filename).write_text('<VirtualHost *:80>\n    ServerName example.be\n</VirtualHost>\n')
+            (av / 'panel-example.be-le-ssl.conf').write_text(
+                '<VirtualHost *:443>\n    ServerName example.be\n    SSLEngine on\n</VirtualHost>\n')
+            with mock.patch.object(sites, 'AVAILABLE', av):
+                text = sites.config_text(site)
+            self.assertIn('VirtualHost *:80', text)
+            self.assertIn('panel-example.be-le-ssl.conf', text)
+            self.assertIn('VirtualHost *:443', text)
+            self.assertIn('SSLEngine on', text)
+
     def test_vhost_static(self):
-        value = sites.vhost('example.be', root=Path('/var/www/example.be/public'), www=True, htaccess=True)
+        value = sites.vhost('example.be', root=Path('/var/www/example.be/public'), www=True)
         for needle in ('ServerName example.be', 'ServerAlias www.example.be', 'AllowOverride All', 'Options -Indexes'):
             self.assertIn(needle, value)
+        none = sites.vhost('example.be', root=Path('/var/www/example.be/public'), htaccess=False)
+        self.assertIn('AllowOverride None', none)
 
     def test_vhost_proxy(self):
         value = sites.vhost('api.example.be', proxy_port=3100)

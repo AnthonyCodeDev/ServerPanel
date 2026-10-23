@@ -58,6 +58,35 @@ def inventory() -> list[Site]:
     return sites
 
 
+def _conf_name(filename: str) -> str:
+    name = Path(filename).name
+    if name != filename or not name.endswith('.conf') or '/' in filename or '\\' in filename:
+        raise PanelError('Nom de configuration invalide')
+    return name
+
+
+def ssl_companion_name(filename: str) -> str:
+    return _conf_name(filename).removesuffix('.conf') + '-le-ssl.conf'
+
+
+def config_text(site: Site) -> str:
+    name = _conf_name(site.filename)
+    path = AVAILABLE / name
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except OSError as exc:
+        raise PanelError(f'Configuration inaccessible : {exc}') from exc
+    ssl_name = ssl_companion_name(name)
+    ssl_path = AVAILABLE / ssl_name
+    if ssl_path.is_file():
+        try:
+            tls = ssl_path.read_text(encoding='utf-8', errors='replace')
+        except OSError as exc:
+            raise PanelError(f'Configuration TLS inaccessible : {exc}') from exc
+        return text.rstrip('\n') + f'\n\n# {ssl_name}\n' + tls
+    return text
+
+
 def validate_webroot(value: str) -> Path:
     path = Path(value.strip())
     if not path.is_absolute() or '..' in path.parts or any(c in str(path) for c in '\x00\r\n"\\'):
@@ -69,7 +98,7 @@ def validate_webroot(value: str) -> Path:
 
 
 def vhost(domain: str, *, root: Path | None = None, proxy_port: int | None = None,
-          www: bool = False, htaccess: bool = False) -> str:
+          www: bool = False, htaccess: bool = True) -> str:
     domain = domain_name(domain)
     if (root is None) == (proxy_port is None):
         raise PanelError('Choisir un dossier web OU un proxy')
@@ -95,7 +124,7 @@ def vhost(domain: str, *, root: Path | None = None, proxy_port: int | None = Non
 
 
 def create(domain: str, *, path: str | None = None, proxy_port: int | None = None,
-           www: bool = False, htaccess: bool = False) -> str:
+           www: bool = False, htaccess: bool = True) -> str:
     root_only()
     domain = domain_name(domain)
     requested = {domain, 'www.' + domain} if www else {domain}
@@ -128,7 +157,7 @@ def create(domain: str, *, path: str | None = None, proxy_port: int | None = Non
         atomic_write(conf, body)
         if proxy_port is not None:
             run('a2enmod', 'proxy', 'proxy_http')
-        if htaccess:
+        if htaccess and root is not None:
             run('a2enmod', 'rewrite')
         run('a2ensite', conf.name)
         run('apache2ctl', '-t')
