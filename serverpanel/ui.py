@@ -329,13 +329,12 @@ class Panel:
         total = len(rows)
         if total <= 0:
             return
-        visible = self.list_visible()
-        max_scroll = max(0, total - visible)
-        self.scroll = max(0, min(max_scroll, self.scroll + delta))
-        if self.index < self.scroll:
-            self.index = self.scroll
-        elif self.index >= self.scroll + visible:
-            self.index = min(total - 1, self.scroll + visible - 1)
+        if self.focus == 'tabs':
+            if delta > 0:
+                self.focus = 'list'
+            return
+        self.index = max(0, min(total - 1, self.index + delta))
+        self.clamp_list_scroll(total, self.list_visible())
 
     def mouse_wheel_delta(self, key) -> int:
         if key in (getattr(curses, 'KEY_SR', -999),):
@@ -469,13 +468,8 @@ class Panel:
             self.put(4, x + 8, '⏎', self.colors.dim)
         y = 5
         if actions:
-            col = x
-            limit = x + inner
             for index, (label, key) in enumerate(actions):
                 chip = f'[{label}]'
-                if col > x and col + len(chip) > limit:
-                    y += 1
-                    col = x
                 if key == 'remove':
                     color = self.colors.bad
                 elif key == 'https':
@@ -484,9 +478,9 @@ class Panel:
                     color = self.colors.normal
                 if self.focus == 'actions' and index == self.action_index:
                     color = self.colors.selected
-                self.put(y, col, chip[:inner], color, True)
-                col += len(chip) + 1
-            y += 2
+                self.put(y, x, chip[:inner], color, True)
+                y += 1
+            y += 1
         elif not self.rows():
             self.put(y, x, 'Aucun site', self.colors.dim)
             y += 2
@@ -1072,6 +1066,26 @@ class Panel:
             if count:
                 self.action_index = min(count - 1, self.action_index + 1)
 
+    def move_vertical(self, delta: int):
+        if self.focus == 'actions':
+            if self.tab == 2:
+                return
+            count = len(self.actions())
+            if count:
+                self.action_index = (self.action_index + delta) % count
+            return
+        if self.focus == 'tabs':
+            if delta > 0 and self.tab != 1:
+                self.focus = 'list'
+            return
+        if delta < 0:
+            if self.index > 0:
+                self.index -= 1
+            else:
+                self.focus = 'tabs'
+            return
+        self.index = min(max(0, len(self.rows()) - 1), self.index + 1)
+
     def handle_enter(self):
         if self.focus == 'tabs':
             if self.tab != 1:
@@ -1118,27 +1132,9 @@ class Panel:
             elif key in (curses.KEY_RIGHT, ord('l')):
                 self.move_horizontal(1)
             elif key in (curses.KEY_UP, ord('k')):
-                if self.focus == 'actions':
-                    count = len(self.actions())
-                    if count:
-                        self.action_index = (self.action_index - 1) % count
-                elif self.focus == 'tabs':
-                    pass
-                else:
-                    if self.index > 0:
-                        self.index -= 1
-                    else:
-                        self.focus = 'tabs'
+                self.move_vertical(-1)
             elif key in (curses.KEY_DOWN, ord('j')):
-                if self.focus == 'actions':
-                    count = len(self.actions())
-                    if count:
-                        self.action_index = (self.action_index + 1) % count
-                elif self.focus == 'tabs':
-                    if self.tab != 1:
-                        self.focus = 'list'
-                else:
-                    self.index = min(max(0, len(self.rows()) - 1), self.index + 1)
+                self.move_vertical(1)
             elif key in KEY_ENTER:
                 self.handle_enter()
             elif key == 9:

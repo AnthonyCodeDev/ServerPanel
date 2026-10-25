@@ -81,6 +81,19 @@ class Tests(unittest.TestCase):
         panel.move_horizontal(-1)
         panel.move_horizontal(-1)
         self.assertEqual(panel.focus, 'list')
+        panel.move_horizontal(1)
+        panel.move_horizontal(1)
+        self.assertEqual(panel.actions()[panel.action_index][1], 'https')
+        panel.move_vertical(-1)
+        panel.move_vertical(1)
+        self.assertEqual(panel.focus, 'actions')
+        self.assertEqual(panel.actions()[panel.action_index][1], 'https')
+        panel.render()
+        chips = [(y, x, text) for y, x, text, _style in panel.win.chunks if text.startswith('[') and text.endswith(']')]
+        action_chips = [c for c in chips if any(label in c[2] for label in ('DÉSACTIVER', 'HTTPS', 'LOGS', 'SUPPRIMER'))]
+        ys = [y for y, _x, _text in action_chips]
+        self.assertEqual(len(set(ys)), len(action_chips))
+        self.assertGreaterEqual(len(action_chips), 4)
 
     def test_enter_moves_focus_then_executes(self):
         panel = self.get_panel()
@@ -219,16 +232,31 @@ class Tests(unittest.TestCase):
         with mock.patch.object(ui, 'pins', return_value=[]):
             panel.scroll_list(-5)
             self.assertEqual(panel.scroll, 0)
+            self.assertEqual(panel.index, 0)
             panel.scroll_list(1)
-            self.assertEqual(panel.scroll, 1)
+            self.assertEqual(panel.index, 1)
+            self.assertEqual(panel.scroll, 0)
             self.assertGreaterEqual(panel.index, panel.scroll)
             self.assertLess(panel.index, panel.scroll + visible)
+            panel.scroll_list(visible)
+            self.assertEqual(panel.index, 1 + visible)
+            self.assertEqual(panel.scroll, panel.index - visible + 1)
             panel.scroll_list(1000)
+            self.assertEqual(panel.index, 39)
             self.assertEqual(panel.scroll, max_scroll)
-            self.assertLess(panel.index, 40)
             panel.scroll_list(-1000)
             self.assertEqual(panel.scroll, 0)
             self.assertEqual(panel.index, 0)
+        panel.set_tab(2)
+        panel.sites = [
+            sites.Site(f'site{i}.be', f'panel-site{i}.be.conf', f'/var/www/site{i}',
+                       True, False, True, True)
+            for i in range(20)
+        ]
+        panel.scroll_list(3)
+        self.assertEqual(panel.index, 3)
+        panel.scroll_list(-1)
+        self.assertEqual(panel.index, 2)
         self.assertEqual(panel.mouse_wheel_delta(ui.curses.KEY_SR), -1)
         self.assertEqual(panel.mouse_wheel_delta(ui.curses.KEY_SF), 1)
         self.assertEqual(panel.mouse_wheel_delta(ord('j')), 0)
