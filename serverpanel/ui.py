@@ -468,8 +468,13 @@ class Panel:
             self.put(4, x + 8, '⏎', self.colors.dim)
         y = 5
         if actions:
+            col = x
+            limit = x + inner
             for index, (label, key) in enumerate(actions):
                 chip = f'[{label}]'
+                if col > x and col + len(chip) > limit:
+                    y += 1
+                    col = x
                 if key == 'remove':
                     color = self.colors.bad
                 elif key == 'https':
@@ -478,9 +483,9 @@ class Panel:
                     color = self.colors.normal
                 if self.focus == 'actions' and index == self.action_index:
                     color = self.colors.selected
-                self.put(y, x, chip[:inner], color, True)
-                y += 1
-            y += 1
+                self.put(y, col, chip[:inner], color, True)
+                col += len(chip) + 1
+            y += 2
         elif not self.rows():
             self.put(y, x, 'Aucun site', self.colors.dim)
             y += 2

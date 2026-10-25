@@ -89,11 +89,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(panel.focus, 'actions')
         self.assertEqual(panel.actions()[panel.action_index][1], 'https')
         panel.render()
-        chips = [(y, x, text) for y, x, text, _style in panel.win.chunks if text.startswith('[') and text.endswith(']')]
-        action_chips = [c for c in chips if any(label in c[2] for label in ('DÉSACTIVER', 'HTTPS', 'LOGS', 'SUPPRIMER'))]
-        ys = [y for y, _x, _text in action_chips]
-        self.assertEqual(len(set(ys)), len(action_chips))
-        self.assertGreaterEqual(len(action_chips), 4)
+        chips = [(y, x, text) for y, x, text, _style in panel.win.chunks
+                 if text.startswith('[') and any(label in text for label in
+                                                ('DÉSACTIVER', 'HTTPS', 'LOGS', 'SUPPRIMER'))]
+        xs = [x for _y, x, _text in chips]
+        self.assertGreaterEqual(len(chips), 4)
+        self.assertEqual(len(set(xs)), len(chips))
 
     def test_enter_moves_focus_then_executes(self):
         panel = self.get_panel()
