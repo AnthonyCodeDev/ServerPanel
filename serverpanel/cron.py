@@ -2,7 +2,9 @@
 
 config.json reste la source de vérité (clé "crons") ; /etc/cron.d/serverpanel
 n'est que la projection lisible par cron. Les crontabs externes sont en lecture
-seule. Aucune commande privilégiée n'est composée en shell ici (argv uniquement).
+seule. L'épinglage est porté par l'entrée cron elle-même (drapeau "pinned") ;
+un cron externe épinglé est matérialisé dans "crons" sous une clé "ext:<hash>".
+Aucune commande privilégiée n'est composée en shell ici (argv uniquement).
 """
 from __future__ import annotations
 
@@ -152,6 +154,7 @@ def _line_value(value) -> str:
 
 
 def _save(data: dict) -> None:
+    _migrate(data)
     atomic_write(CONFIG, json.dumps(data, indent=2, ensure_ascii=False) + '\n')
     try:
         _write_managed(data)
@@ -168,13 +171,92 @@ def _pinned_allowed(values) -> list[str]:
     return result[:PINNED_MAX]
 
 
+def _is_ext_entry(entry) -> bool:
+    """Entrée matérialisant un cron externe épinglé (drapeau "ext")."""
+    return isinstance(entry, dict) and _flag(entry.get('ext'), False)
+
+
+def _is_ext_key(key) -> bool:
+    """Clé de favori externe ("ext:…") ou entrée dict portant le drapeau ext."""
+    if isinstance(key, dict):
+        return _is_ext_entry(key)
+    return isinstance(key, str) and key.startswith('ext:')
+
+
+def _ext(key, entry=None) -> bool:
+    """Entrée externe : clé "ext:" ou drapeau "ext" (config éditée à la main).
+
+    La clé suffit à identifier une entrée externe ; le panel pose en plus le
+    drapeau "ext", mais son absence ne doit jamais transformer l'entrée en cron
+    géré ni la projeter dans /etc/cron.d/serverpanel.
+    """
+    return _is_ext_key(key) or _is_ext_entry(entry)
+
+
+def _pinned_keys(data: dict) -> list[str]:
+    """Clés de favoris dans l'ordre des entrées de "crons" (jamais d'exception)."""
+    result: list[str] = []
+    for key, entry in _crons(data).items():
+        if not isinstance(entry, dict):
+            continue
+        if _ext(key, entry):
+            candidate = str(key)  # Une entrée ext reste épinglée même sans "pinned"
+        elif _flag(entry.get('pinned'), False):
+            candidate = f'panel:{key}'
+        else:
+            continue
+        if PIN_RX.fullmatch(candidate) and candidate not in result:
+            result.append(candidate)
+            if len(result) >= PINNED_MAX:
+                break
+    return result
+
+
+def _migrate(data: dict) -> bool:
+    """Convertit l'ancienne clé "pinned_crons" en drapeaux dans "crons".
+
+    Idempotent : la clé de premier niveau disparaît définitivement. Les clés
+    invalides et les doublons sont ignorés. Renvoie True si la config a changé.
+    """
+    if not isinstance(data, dict):
+        return False
+    changed = 'pinned_crons' in data
+    legacy = data.pop('pinned_crons', None)
+    if not isinstance(legacy, list):
+        return changed
+    crons = _crons(data)
+    created = False
+    for key in _pinned_allowed(legacy):
+        if _is_ext_key(key):
+            if key in crons:
+                continue  # Déjà matérialisé : l'entrée ext fait foi
+            crons[key] = {'ext': True, 'pinned': True}
+            created = True
+            changed = True
+            continue
+        slug = key[len('panel:'):]
+        entry = crons.get(slug)
+        if isinstance(entry, dict) and not _ext(slug, entry):
+            if not _flag(entry.get('pinned'), False):
+                entry['pinned'] = True
+                changed = True
+    if created:
+        data['crons'] = crons
+    return changed
+
+
 def pinned_crons() -> list[str]:
-    """Favoris cron épinglés depuis config.json (jamais d'exception remontée)."""
+    """Favoris cron depuis les entrées de config.json (jamais d'exception remontée).
+
+    La migration de l'ancienne clé "pinned_crons" est appliquée en mémoire
+    uniquement : la lecture ne doit jamais réécrire la config (pas de root requis).
+    """
     try:
         data = _load()
     except PanelError:
         return []
-    return _pinned_allowed(data.get('pinned_crons'))
+    _migrate(data)
+    return _pinned_keys(data)
 
 
 def toggle_pin(job: CronJob) -> bool:
@@ -184,16 +266,28 @@ def toggle_pin(job: CronJob) -> bool:
     if not PIN_RX.fullmatch(key):
         raise PanelError('Favori cron invalide')
     data = _load()
-    current = _pinned_allowed(data.get('pinned_crons'))
-    if key in current:
-        current.remove(key)
+    _migrate(data)
+    crons = _crons(data)
+    if job.managed and job.slug:
+        entry = crons.get(job.slug)
+        if not isinstance(entry, dict) or _ext(job.slug, entry):
+            raise PanelError(f'Cron introuvable : {job.slug}')
+        if _flag(entry.get('pinned'), False):
+            entry.pop('pinned', None)  # Config propre : pas de "pinned": false
+            pinned = False
+        else:
+            entry['pinned'] = True
+            pinned = True
+    elif key in crons:
+        # Une entrée ext ne sert qu'au favori : la désépingler la supprime.
+        crons.pop(key)
         pinned = False
     else:
-        if len(current) >= PINNED_MAX:
+        if len(_pinned_keys(data)) >= PINNED_MAX:
             raise PanelError(f'Favoris cron : {PINNED_MAX} maximum')
-        current.append(key)
+        crons[key] = {'ext': True, 'pinned': True}
+        data['crons'] = crons
         pinned = True
-    data['pinned_crons'] = current
     _save(data)
     return pinned
 
@@ -207,7 +301,8 @@ def _escape_percent(command: str) -> str:
 
 
 def _managed_content(crons: dict) -> str:
-    entries = [entry for entry in crons.values() if isinstance(entry, dict)]
+    entries = [entry for key, entry in crons.items()
+               if isinstance(entry, dict) and not _ext(key, entry)]
     entries.sort(key=lambda entry: _single(entry.get('label')).casefold())
     if not entries:
         return HEADER + '\n# Aucun cron géré.\n'
@@ -733,6 +828,8 @@ def update(slug: str, **fields) -> None:
     data = _load()
     crons = _crons(data)
     entry = crons.get(key)
+    if key in crons and _ext(key, entry):
+        raise PanelError('Cron externe : lecture seule')
     if not isinstance(entry, dict):
         raise PanelError(f'Cron introuvable : {key or slug}')
     updated = dict(entry)
@@ -765,6 +862,8 @@ def remove(slug: str) -> None:
     key = str(slug or '').strip()
     data = _load()
     crons = _crons(data)
+    if key in crons and _ext(key, crons.get(key)):
+        raise PanelError('Cron externe : lecture seule')
     if key not in crons:
         raise PanelError(f'Cron introuvable : {key or slug}')
     crons.pop(key)
@@ -871,7 +970,7 @@ def inventory() -> list[CronJob]:
     except PanelError:
         data = {}
     for slug, entry in _crons(data).items():
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or _ext(slug, entry):
             continue
         command = _line_value(entry.get('command'))
         jobs.append(CronJob(

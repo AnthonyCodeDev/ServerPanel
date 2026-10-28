@@ -90,18 +90,23 @@ La liste est construite à partir de tous les crons de la machine : `/etc/cronta
 
 Ces crons système sont inclus en lecture seule et nommés d'après ce qui les identifie vraiment : le fichier pour `/etc/cron.d/*` (`certbot`, `e2scrub_all`), la période pour les lignes `run-parts` de `/etc/crontab` (`cron.daily`, `cron.weekly`…) et le compte pour les crontabs utilisateur (`alice · job.sh`). Ils sont masqués par défaut : `A` les rend visibles, et `F` permet de les épingler pour les garder dans la vue favoris.
 
-Les jobs sont stockés dans `/etc/serverpanel/config.json`, clé `crons`. Les favoris de crons y sont stockés dans la clé `pinned_crons`, sous forme d'identifiants : `panel:<slug>` pour un job géré et `ext:<hash>` pour un cron externe. Le fichier `/etc/cron.d/serverpanel` est régénéré à chaque changement (`0644`, root) : toute édition manuelle est écrasée. Un job désactivé reste dans la config mais n'est pas planifié.
+Les jobs sont stockés dans `/etc/serverpanel/config.json`, clé `crons`. L'épinglage est porté par l'entrée elle-même : un job géré est favori avec `"pinned": true`. Un cron externe épinglé est matérialisé dans `crons` par une entrée `ext:<hash>` marquée `{"ext": true, "pinned": true}` : elle ne sert qu'au favori, n'est jamais projetée dans `/etc/cron.d/serverpanel` et le cron externe reste en lecture seule. La clé `ext:<hash>` suffit à identifier une entrée externe, même si le drapeau `ext` est absent (config éditée à la main) ; le panel le pose systématiquement. L'ordre des clés de `crons` fait foi pour l'ordre d'affichage des favoris. L'ancienne clé de premier niveau `pinned_crons` est migrée automatiquement vers ce format à la première écriture. Le fichier `/etc/cron.d/serverpanel` est régénéré à chaque changement (`0644`, root) : toute édition manuelle est écrasée. Un job désactivé reste dans la config mais n'est pas planifié.
 
 ```json
 {
-  "pinned_crons": ["panel:sauvegarde", "ext:0123456789abcdef"],
+  "pinned": ["ssh"],
   "crons": {
     "sauvegarde": {
       "label": "Sauvegarde nocturne",
       "command": "/usr/local/bin/backup.sh",
       "schedule": "30 2 * * *",
       "user": "root",
-      "enabled": true
+      "enabled": true,
+      "pinned": true
+    },
+    "ext:0123456789abcdef": {
+      "ext": true,
+      "pinned": true
     }
   }
 }

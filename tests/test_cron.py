@@ -557,7 +557,7 @@ class Inventory(CronBase):
 
 
 class Pinned(CronBase):
-    """Favoris cron : clés stables, config.json préservé, plafond respecté."""
+    """Favoris cron portés par les entrées : config.json préservé, plafond respecté."""
 
     def external(self, **overrides):
         fields = dict(label='Uptime', command='/usr/bin/uptime', user='root',
@@ -571,6 +571,12 @@ class Pinned(CronBase):
                       managed=True, slug='sauvegarde')
         fields.update(overrides)
         return cron.CronJob(**fields)
+
+    def managed_entry(self, **overrides):
+        entry = {'label': 'Sauvegarde', 'command': '/usr/local/bin/backup.sh',
+                 'schedule': '0 3 * * *', 'user': 'root', 'enabled': True}
+        entry.update(overrides)
+        return entry
 
     def test_key_is_stable_for_external_jobs(self):
         first = self.external()
@@ -597,43 +603,103 @@ class Pinned(CronBase):
                                        source=nameless.source).key)
 
     def test_pinned_crons_filters_invalid_entries(self):
-        self.write_config({'pinned_crons': ['panel:sauvegarde', 'ext:abc123',
-                                            'invalide', 42, None, 'panel:', 'ext:a b',
-                                            'x' * 80, 'panel:sauvegarde'],
-                           'pinned': ['ssh']})
-        self.assertEqual(cron.pinned_crons(), ['panel:sauvegarde', 'ext:abc123'])
+        self.write_config({'crons': {
+            'sauvegarde': {'pinned': True},
+            'autre': {'pinned': 'oui'},  # Tolérance _flag : chaîne "oui"
+            'faux': {'pinned': 'non'},
+            'absent': {},
+            'cassé': 42,  # Entrée non dict ignorée
+            'Ext bruit': {'ext': True},  # Clé ext sans préfixe : invalide
+            'ext:abc123': {'ext': True},  # ext sans "pinned" reste épinglé
+            'ext:a b': {'ext': True},  # PIN_RX invalide
+            'ext:' + 'x' * 80: {'ext': True},  # Trop long
+            'ext:def456': {'ext': True, 'pinned': True},
+        }, 'pinned': ['ssh']})
+        self.assertEqual(cron.pinned_crons(),
+                         ['panel:sauvegarde', 'panel:autre', 'ext:abc123', 'ext:def456'])
+
+    def test_ext_key_without_flag_is_external(self):
+        # Config éditée à la main : la clé "ext:" suffit, même sans drapeau.
+        self.write_config({'crons': {'ext:abc123': {'pinned': True}}})
+        self.assertEqual(cron.pinned_crons(), ['ext:abc123'])
+        with mock.patch.object(cron.os, 'geteuid', return_value=0, create=True):
+            jobs = cron.inventory()
+        self.assertEqual(jobs, [])
+        self.assertFalse(any(job.slug == 'ext:abc123' for job in jobs))
+        text = self.managed_text()
+        self.assertIn('# Aucun cron géré.', text)
+        self.assertNotIn('ext:abc123', text)
+
+    def test_ext_key_and_flag_yield_single_favorite(self):
+        self.write_config({'crons': {'ext:abc123': {'ext': True, 'pinned': True}}})
+        self.assertEqual(cron.pinned_crons(), ['ext:abc123'])
 
     def test_pinned_crons_tolerates_bad_config(self):
-        self.write_config({'pinned_crons': 'pas une liste'})
+        self.write_config({'crons': 'pas un dictionnaire'})
         self.assertEqual(cron.pinned_crons(), [])
         self.write_config('{cassé')
         self.assertEqual(cron.pinned_crons(), [])
+        self.config.unlink()
+        self.assertEqual(cron.pinned_crons(), [])
+        self.assertFalse(self.config.exists())
 
-    def test_toggle_pin_adds_then_removes(self):
+    def test_toggle_pin_managed_adds_then_removes(self):
+        self.write_config({'crons': {'sauvegarde': self.managed_entry()},
+                           'pinned': ['ssh'],
+                           'custom_services': {'bot': {'folder': '/srv/apps/bot'}},
+                           'future': {'nested': True}})
         job = self.managed_job()
         self.assertTrue(cron.toggle_pin(job))
         data = self.read_config()
-        self.assertEqual(data['pinned_crons'], ['panel:sauvegarde'])
+        self.assertTrue(data['crons']['sauvegarde']['pinned'])
+        self.assertEqual(cron.pinned_crons(), ['panel:sauvegarde'])
         # Toutes les autres clés restent intactes.
         self.assertEqual(data['pinned'], ['ssh'])
         self.assertEqual(data['custom_services'], {'bot': {'folder': '/srv/apps/bot'}})
         self.assertEqual(data['future'], {'nested': True})
-        self.assertIn('# Aucun cron géré.', self.managed_text())
+        self.assertNotIn('pinned_crons', data)
+        self.assertIn('0 3 * * * root /usr/local/bin/backup.sh', self.managed_text())
+        # Désépinglage : la clé "pinned" disparaît de l'entrée (config propre).
         self.assertFalse(cron.toggle_pin(job))
         data = self.read_config()
-        self.assertEqual(data['pinned_crons'], [])
+        self.assertNotIn('pinned', data['crons']['sauvegarde'])
+        self.assertEqual(cron.pinned_crons(), [])
         self.assertEqual(data['pinned'], ['ssh'])
+        self.assertEqual(data['crons']['sauvegarde'], self.managed_entry())
 
-    def test_toggle_pin_keeps_order_and_accepts_externals(self):
-        jobs = [self.external(command='/bin/true'), self.external(), self.managed_job()]
+    def test_toggle_pin_external_adds_then_removes(self):
+        self.write_config({'crons': {'sauvegarde': self.managed_entry()},
+                           'pinned': ['ssh']})
+        job = self.external()
+        self.assertTrue(cron.toggle_pin(job))
+        data = self.read_config()
+        self.assertEqual(data['crons'][job.key], {'ext': True, 'pinned': True})
+        # L'ordre des clés de "crons" fait foi pour l'affichage des favoris.
+        self.assertEqual(list(data['crons']), ['sauvegarde', job.key])
+        self.assertEqual(cron.pinned_crons(), [job.key])
+        self.assertEqual(data['pinned'], ['ssh'])
+        # La projection /etc/cron.d/serverpanel ignore l'entrée externe.
+        text = self.managed_text()
+        self.assertNotIn('ext:', text)
+        self.assertIn('0 3 * * * root /usr/local/bin/backup.sh', text)
+        self.assertFalse(cron.toggle_pin(job))
+        self.assertNotIn(job.key, self.read_config()['crons'])
+        self.assertEqual(cron.pinned_crons(), [])
+
+    def test_toggle_pin_externals_keep_config_order(self):
+        self.write_config({'crons': {'sauvegarde': self.managed_entry()}})
+        jobs = [self.external(command='/bin/true'), self.external()]
         for job in jobs:
             self.assertTrue(cron.toggle_pin(job))
-        self.assertEqual(self.read_config()['pinned_crons'],
-                         [jobs[0].key, jobs[1].key, 'panel:sauvegarde'])
+        self.assertEqual(list(self.read_config()['crons']),
+                         ['sauvegarde', jobs[0].key, jobs[1].key])
+        self.assertEqual(cron.pinned_crons(), [jobs[0].key, jobs[1].key])
 
     def test_toggle_pin_refuses_invalid_key(self):
+        self.write_config({'crons': {'sauvegarde': self.managed_entry()}})
         with self.assertRaises(cron.PanelError):
             cron.toggle_pin(self.managed_job(slug='nom invalide'))
+        self.assertEqual(self.read_config(), {'crons': {'sauvegarde': self.managed_entry()}})
         self.assertNotIn('pinned_crons', self.read_config())
 
     def test_toggle_pin_never_overwrites_broken_config(self):
@@ -644,25 +710,103 @@ class Pinned(CronBase):
         self.assertEqual(self.config.read_text(encoding='utf-8'), broken)
         self.assertFalse(self.managed.exists())
 
-    def test_toggle_pin_minimum_when_config_missing(self):
+    def test_toggle_pin_missing_config(self):
         self.config.unlink()
-        self.assertTrue(cron.toggle_pin(self.managed_job()))
-        self.assertEqual(self.read_config(), {'pinned_crons': ['panel:sauvegarde']})
+        # Cron géré dont l'entrée manque : cohérent avec update(), refus explicite.
+        with self.assertRaisesRegex(cron.PanelError, 'introuvable'):
+            cron.toggle_pin(self.managed_job())
+        self.assertFalse(self.config.exists())
+        # Un cron externe, lui, peut être épinglé : la config est créée.
+        job = self.external()
+        self.assertTrue(cron.toggle_pin(job))
+        self.assertEqual(self.read_config(),
+                         {'crons': {job.key: {'ext': True, 'pinned': True}}})
 
     def test_toggle_pin_is_capped_at_fifty(self):
         keys = [f'ext:{index:016x}' for index in range(50)]
-        self.write_config({'pinned_crons': keys, 'pinned': ['ssh']})
+        crons = {key: {'ext': True, 'pinned': True} for key in keys}
+        self.write_config({'crons': dict(crons), 'pinned': ['ssh']})
         self.assertEqual(cron.pinned_crons(), keys)
-        with self.assertRaises(cron.PanelError):
-            cron.toggle_pin(self.managed_job())
-        self.assertEqual(self.read_config()['pinned_crons'], keys)
+        with self.assertRaisesRegex(cron.PanelError, '50 maximum'):
+            cron.toggle_pin(self.external())
+        self.assertEqual(self.read_config()['crons'], crons)
         self.assertEqual(self.read_config()['pinned'], ['ssh'])
-        # À 49 favoris, l'ajout passe et complète la liste.
-        self.write_config({'pinned_crons': keys[:49]})
-        self.assertTrue(cron.toggle_pin(self.managed_job()))
-        pinned = self.read_config()['pinned_crons']
+        # À 49 favoris, l'ajout passe et complète la liste à 50.
+        self.write_config({'crons': {key: crons[key] for key in keys[:49]}})
+        job = self.external()
+        self.assertTrue(cron.toggle_pin(job))
+        pinned = cron.pinned_crons()
         self.assertEqual(len(pinned), 50)
-        self.assertEqual(pinned[-1], 'panel:sauvegarde')
+        self.assertEqual(pinned[-1], job.key)
+        self.assertEqual(self.read_config()['crons'][job.key],
+                         {'ext': True, 'pinned': True})
+
+    def test_migration_from_legacy_pinned_crons(self):
+        self.write_config({'pinned_crons': ['panel:sauvegarde', 'ext:abc123',
+                                            'panel:inconnu', 'invalide', 42,
+                                            'panel:sauvegarde'],
+                           'crons': {'sauvegarde': self.managed_entry()},
+                           'pinned': ['ssh']})
+        # Lecture : migration en mémoire, le fichier n'est pas réécrit.
+        self.assertEqual(cron.pinned_crons(), ['panel:sauvegarde', 'ext:abc123'])
+        self.assertIn('pinned_crons', self.read_config())
+        # Toute écriture migre définitivement la config.
+        self.assertTrue(cron.toggle_pin(self.external()))
+        data = self.read_config()
+        self.assertNotIn('pinned_crons', data)
+        self.assertTrue(data['crons']['sauvegarde']['pinned'])
+        self.assertEqual(data['crons']['ext:abc123'], {'ext': True, 'pinned': True})
+        self.assertEqual(data['pinned'], ['ssh'])
+        # Cas d'une entrée ext déjà matérialisée : elle n'est pas dupliquée.
+        self.write_config({'pinned_crons': ['ext:abc123'],
+                           'crons': {'ext:abc123': {'ext': True}}})
+        self.assertEqual(cron.pinned_crons(), ['ext:abc123'])
+        self.assertEqual(self.read_config()['crons'], {'ext:abc123': {'ext': True}})
+
+    def test_external_entry_is_not_projected_nor_managed(self):
+        job = self.external(source=str(self.crontab))
+        self.write_config({'crons': {'sauvegarde': self.managed_entry()}})
+        self.assertTrue(cron.toggle_pin(job))
+        self.crontab.write_text('17 * * * * root /usr/bin/uptime\n', encoding='utf-8')
+        with mock.patch.object(cron.os, 'geteuid', return_value=0, create=True):
+            jobs = cron.inventory()
+        matches = [item for item in jobs if item.key == job.key]
+        self.assertEqual(len(matches), 1)  # Pas de doublon géré/externe
+        self.assertFalse(matches[0].managed)
+        self.assertEqual(matches[0].command, '/usr/bin/uptime')
+        text = self.managed_text()
+        self.assertNotIn('ext:', text)
+        self.assertIn('0 3 * * * root /usr/local/bin/backup.sh', text)
+
+    def test_external_entries_are_read_only(self):
+        self.write_config({'crons': {'sauvegarde': self.managed_entry()}})
+        job = self.external()
+        self.assertTrue(cron.toggle_pin(job))
+        before = self.read_config()
+        with self.assertRaisesRegex(cron.PanelError, 'lecture seule'):
+            cron.update(job.key, label='Autre')
+        with self.assertRaisesRegex(cron.PanelError, 'lecture seule'):
+            cron.remove(job.key)
+        self.assertEqual(self.read_config(), before)
+
+    def test_ext_key_without_flag_is_read_only(self):
+        self.write_config({'crons': {'ext:abc123': {'pinned': True}}})
+        before = self.read_config()
+        with self.assertRaisesRegex(cron.PanelError, 'lecture seule'):
+            cron.update('ext:abc123', command='/bin/true')
+        with self.assertRaisesRegex(cron.PanelError, 'lecture seule'):
+            cron.remove('ext:abc123')
+        self.assertEqual(self.read_config(), before)
+
+    def test_update_preserves_pinned_and_other_keys(self):
+        self.write_config({'crons': {'sauvegarde': self.managed_entry(
+            pinned=True, future={'note': 'gardée'})}})
+        cron.update('sauvegarde', label='Backup')
+        entry = self.read_config()['crons']['sauvegarde']
+        self.assertTrue(entry['pinned'])
+        self.assertEqual(entry['future'], {'note': 'gardée'})
+        self.assertEqual(entry['label'], 'Backup')
+        self.assertEqual(cron.pinned_crons(), ['panel:sauvegarde'])
 
 
 class NextRun(unittest.TestCase):

@@ -64,13 +64,22 @@ favourites. Managed jobs are stored in
 .I /etc/serverpanel/config.json
 under the
 .B crons
-key, and cron favourites under the
-.B pinned_crons
-key as
-.I panel:<slug>
-for a managed job or
+key. Favourites are carried by the cron entries themselves: a managed entry is
+pinned with a
+.B pinned
+flag, while a pinned external cron is materialised under an
 .I ext:<hash>
-for an external cron. Managed jobs are written to
+key with
+.B ext
+and
+.B pinned
+set to true. The order of the
+.B crons
+keys is the favourite display order. The former
+.B pinned_crons
+key is migrated automatically; pinned external entries are never projected to
+.IR /etc/cron.d/serverpanel .
+Managed jobs are written to
 .IR /etc/cron.d/serverpanel ,
 which is regenerated on every change; manual edits of that file are
 overwritten. The assistant builds a schedule from daily, weekly, monthly,
