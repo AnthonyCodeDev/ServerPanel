@@ -1,3 +1,0 @@
-{
-  "pinned": ["apache2", "ssh", "postgresql", "mariadb", "redis-server", "fail2ban"]
-}

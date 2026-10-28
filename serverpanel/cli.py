@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from .common import VERSION, PanelError, pins, stats
+from .common import VERSION, PanelError, ensure_config, pins, stats
 from . import services
 
 
@@ -70,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     if os.geteuid() != 0:
         print('Droits root requis.\nRelance avec : sudo panel', file=sys.stderr)
         return 1
+    # Premier lancement : crée config.json avec les favoris des services installés.
+    ensure_config()
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print('Terminal interactif requis. Résumé : panel motd', file=sys.stderr)
         return 2

@@ -1,6 +1,8 @@
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -256,6 +258,233 @@ class Validation(unittest.TestCase):
         with mock.patch.object(sites, 'root_only'):
             with self.assertRaises(common.PanelError):
                 sites.certificate(site, 'admin@test.be')
+
+
+class ConfigIsTruth(unittest.TestCase):
+    """config.json → systemd provisioning (no systemd, no root needed)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.units = root / 'units'; self.units.mkdir()
+        self.apps = root / 'apps'; self.apps.mkdir()
+        self.folder = self.apps / 'webapp'; self.folder.mkdir()
+        self.config = root / 'config.json'
+        self.saved = {'pinned': ['ssh'], 'custom_services': {}}
+        self.config.write_text(json.dumps(self.saved, indent=2))
+        services.take_sync_messages()
+
+    def entry(self, **overrides):
+        entry = {'command': f'"{sys.executable}" app.py', 'folder': str(self.folder),
+                 'user': 'www-data'}
+        entry.update(overrides)
+        self.saved['custom_services']['webapp'] = entry
+        self.config.write_text(json.dumps(self.saved, indent=2))
+
+    def sync(self, uid=33):
+        account = types.SimpleNamespace(pw_uid=uid)
+        self.enabled = getattr(self, 'enabled', False)
+        state = {'calls': []}
+
+        def runner(*argv, **_kw):
+            state['calls'].append(argv)
+            if argv[:2] == ('systemctl', 'is-enabled'):
+                return 'enabled\n' if self.enabled else 'disabled\n'
+            if argv[:2] == ('systemctl', 'enable'):
+                self.enabled = True
+            if argv[:2] == ('systemctl', 'disable'):
+                self.enabled = False
+            return ''
+
+        with mock.patch.object(services, 'UNITS', self.units), \
+             mock.patch.object(services, 'APPS', self.apps), \
+             mock.patch.object(services, 'CONFIG', self.config), \
+             mock.patch.object(common, 'CONFIG', self.config), \
+             mock.patch.object(services.os, 'geteuid', return_value=0), \
+             mock.patch.object(services, 'run', runner), \
+             mock.patch.object(services.pwd, 'getpwnam', return_value=account):
+            services._sync_panel_to_config()
+            return state, services.take_sync_messages()
+
+    def test_missing_unit_is_created_once(self):
+        self.entry(autostart=True, pinned=True)
+        state, messages = self.sync()
+        unit = self.units / 'panel-webapp.service'
+        self.assertTrue(unit.is_file())
+        content = unit.read_text()
+        self.assertIn('User=www-data', content)
+        self.assertIn(f'WorkingDirectory={self.folder}', content)
+        self.assertIn(('systemd-analyze', 'verify', str(unit)), state['calls'])
+        self.assertIn(('systemctl', 'enable', 'panel-webapp.service'), state['calls'])
+        self.assertIn(('systemctl', 'start', 'panel-webapp.service'), state['calls'])
+        self.assertEqual(json.loads(self.config.read_text())['pinned'], ['ssh', 'panel-webapp'])
+        self.assertTrue(any(not error and 'créé' in text for error, text in messages))
+
+        # Deuxième passe : aucun doublon, aucune action
+        state, messages = self.sync()
+        self.assertEqual(messages, [])
+        self.assertNotIn(('systemctl', 'start', 'panel-webapp.service'), state['calls'])
+        self.assertNotIn(('systemd-analyze', 'verify', str(unit)), state['calls'])
+
+    def test_config_edits_are_applied(self):
+        self.entry(autostart=True)
+        self.sync()
+        unit = self.units / 'panel-webapp.service'
+        self.entry(autostart=False, command=f'"{sys.executable}" main.py')
+        state, _ = self.sync()
+        self.assertIn('"main.py"', unit.read_text())
+        self.assertIn(('systemctl', 'daemon-reload'), state['calls'])
+        self.assertIn(('systemctl', 'disable', 'panel-webapp.service'), state['calls'])
+        self.assertFalse(self.enabled)
+
+    def test_unsafe_entries_are_refused(self):
+        other = self.apps / 'other'; other.mkdir()
+        outside = Path(self.temp.name) / 'outside'; outside.mkdir()
+        unsafe = {
+            'root': {'command': f'"{sys.executable}" x.py', 'folder': str(other), 'user': 'root'},
+            'nouser': {'command': f'"{sys.executable}" x.py', 'folder': str(outside)},
+            'ghost': {'command': f'"{sys.executable}" x.py',
+                      'folder': str(Path(self.temp.name) / 'ghost'), 'user': 'www-data'},
+            'Bad_Slug': {'command': f'"{sys.executable}" x.py', 'folder': str(other)},
+        }
+        for slug, entry in unsafe.items():
+            with self.subTest(slug=slug):
+                self.saved['custom_services'] = {slug: entry}
+                self.config.write_text(json.dumps(self.saved, indent=2))
+                _state, messages = self.sync(uid=0 if slug == 'root' else 33)
+                self.assertFalse((self.units / f'panel-{slug}.service').exists())
+                self.assertTrue(any(error for error, _text in messages))
+
+    def test_discovery_registers_existing_unit(self):
+        (self.units / 'panel-legacy.service').write_text(
+            '[Service]\nUser=www-data\nWorkingDirectory=/var/www/app\nExecStart=/usr/bin/npm run start\n')
+        self.sync()
+        saved = json.loads(self.config.read_text())['custom_services']['legacy']
+        self.assertEqual(saved['user'], 'www-data')
+        self.assertEqual(saved['folder'], '/var/www/app')
+        self.assertEqual(saved['command'], '/usr/bin/npm run start')
+
+    def test_invalid_json_is_never_rewritten(self):
+        broken = '{"custom_services": {"webapp": '
+        self.config.write_text(broken)
+        state, messages = self.sync()
+        self.assertEqual(self.config.read_text(), broken)
+        self.assertEqual(state['calls'], [])
+        self.assertTrue(any(error and 'invalide' in text for error, text in messages))
+
+
+class DefaultConfig(unittest.TestCase):
+    """ensure_config : créé une seule fois, favoris filtrés sur l'hôte."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.config = Path(self.temp.name) / 'etc/serverpanel/config.json'
+        # Windows n'expose pas os.fchmod : neutralisé pour exercer atomic_write.
+        patcher = mock.patch.object(common.os, 'fchmod', mock.Mock(), create=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def ensure(self, units, root=True):
+        with mock.patch.object(common, 'CONFIG', self.config), \
+             mock.patch.object(common, 'installed_units', return_value=set(units)), \
+             mock.patch.object(common.os, 'geteuid', return_value=0 if root else 1000, create=True):
+            return common.ensure_config()
+
+    def test_creates_pins_for_installed_services_only(self):
+        created = self.ensure({'apache2.service', 'ssh.service', 'mariadb.service',
+                               'redis-server.service'})
+        self.assertTrue(created)
+        self.assertEqual(json.loads(self.config.read_text(encoding='utf-8')),
+                         {'pinned': ['apache2', 'ssh', 'mariadb', 'redis-server']})
+
+    def test_no_installed_service_yields_empty_pins(self):
+        self.assertTrue(self.ensure(set()))
+        self.assertEqual(json.loads(self.config.read_text(encoding='utf-8')), {'pinned': []})
+
+    def test_existing_file_is_never_modified(self):
+        self.config.parent.mkdir(parents=True)
+        original = '{"pinned": ["custom"], "autre": 1}'
+        self.config.write_text(original, encoding='utf-8')
+        self.assertFalse(self.ensure({'apache2.service', 'ssh.service'}))
+        self.assertEqual(self.config.read_text(encoding='utf-8'), original)
+
+    def test_existing_invalid_json_is_never_modified(self):
+        self.config.parent.mkdir(parents=True)
+        broken = '{"pinned": ['
+        self.config.write_text(broken, encoding='utf-8')
+        self.assertFalse(self.ensure({'ssh.service'}))
+        self.assertEqual(self.config.read_text(encoding='utf-8'), broken)
+
+    def test_non_root_creates_nothing(self):
+        self.assertFalse(self.ensure({'ssh.service'}, root=False))
+        self.assertFalse(self.config.exists())
+
+
+class Fastfetch(unittest.TestCase):
+    """fastfetch_info : optionnel, jamais bloquant, jamais de shell."""
+
+    OUTPUT = ('\x1b[1mOS\x1b[0m: Debian GNU/Linux 13 (trixie)\n'
+              'Host: \x1b[32mleon\x1b[0m\n'
+              'Kernel: 6.12.0-amd64\n'
+              'Uptime: 3 days, 4 hours\n'
+              'Local IP (eth0): 192.168.1.20\n')
+
+    def test_missing_binary_returns_empty_without_subprocess(self):
+        with mock.patch.object(common.shutil, 'which', return_value=None), \
+             mock.patch.object(common, 'run') as runner:
+            self.assertEqual(common.fastfetch_info(), {})
+        runner.assert_not_called()
+
+    def test_parses_keys_and_first_local_ip(self):
+        output = self.OUTPUT + 'Local IP (wlan0): 10.0.0.5\n'
+        with mock.patch.object(common.shutil, 'which', return_value='/usr/bin/fastfetch'), \
+             mock.patch.object(common, 'run', return_value=output) as runner:
+            info = common.fastfetch_info()
+        self.assertEqual(info, {'os': 'Debian GNU/Linux 13 (trixie)', 'host': 'leon',
+                                'kernel': '6.12.0-amd64', 'uptime': '3 days, 4 hours',
+                                'local ip': '192.168.1.20'})
+        runner.assert_called_once()
+
+    def test_command_line_and_no_shell(self):
+        calls = []
+
+        def runner(*argv, **kwargs):
+            calls.append((argv, kwargs))
+            return self.OUTPUT
+
+        with mock.patch.object(common.shutil, 'which', return_value='/usr/bin/fastfetch'), \
+             mock.patch.object(common, 'run', side_effect=runner):
+            common.fastfetch_info()
+        argv, kwargs = calls[0]
+        self.assertEqual(argv[:6], ('fastfetch', '--config', 'none', '--pipe', '--logo', 'none'))
+        self.assertEqual(argv[6:], ('--structure', 'os:host:kernel:uptime:localip'))
+        self.assertNotIn('shell', kwargs)
+        self.assertEqual(kwargs.get('check'), False)
+
+    def test_falls_back_to_next_structure(self):
+        outputs = ['', self.OUTPUT]
+
+        def runner(*_argv, **_kwargs):
+            return outputs.pop(0) if outputs else ''
+
+        with mock.patch.object(common.shutil, 'which', return_value='/usr/bin/fastfetch'), \
+             mock.patch.object(common, 'run', side_effect=runner) as run_mock:
+            info = common.fastfetch_info()
+        self.assertEqual(info['host'], 'leon')
+        self.assertEqual(run_mock.call_count, 2)
+
+    def test_panel_error_never_propagates(self):
+        with mock.patch.object(common.shutil, 'which', return_value='/usr/bin/fastfetch'), \
+             mock.patch.object(common, 'run', side_effect=common.PanelError('boom')):
+            self.assertEqual(common.fastfetch_info(), {})
+
+    def test_unusable_output_returns_empty(self):
+        with mock.patch.object(common.shutil, 'which', return_value='/usr/bin/fastfetch'), \
+             mock.patch.object(common, 'run', return_value='pas de deux-points\n'):
+            self.assertEqual(common.fastfetch_info(), {})
+
 
 
 if __name__ == '__main__':

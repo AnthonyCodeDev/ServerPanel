@@ -2,8 +2,17 @@
 # Install the editable Python source tree on Debian 13 (no .deb).
 set -euo pipefail
 
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-    printf 'Droits root requis.\nRelance avec : sudo bash %s\n' "$0" >&2
+# Contrôle root : doit rester la toute première instruction exécutable du
+# script, avant toute autre vérification (os-release, dpkg-query, ...), afin
+# qu'aucune étape d'installation ne s'affiche ni ne s'exécute sans sudo.
+# Compatible bash et sh : test POSIX, repli si EUID ou id ne sont pas dispos.
+install_uid=${EUID:-$(id -u 2>/dev/null || printf 'inconnu')}
+if [ "$install_uid" != '0' ]; then
+    install_user=$(id -un 2>/dev/null || printf 'inconnu')
+    printf 'Erreur : installation sans sudo.\n\n' >&2
+    printf 'Le script doit être lancé en root (utilisateur détecté : %s, UID : %s).\n\n' \
+        "$install_user" "$install_uid" >&2
+    printf 'Relance avec :\n\n    sudo bash %s\n' "$0" >&2
     exit 1
 fi
 if [[ ! -f /etc/os-release ]]; then
@@ -21,7 +30,7 @@ if dpkg-query -W -f='${Status}' serverpanel 2>/dev/null | grep -qx 'install ok i
     exit 1
 fi
 SOURCE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-for file in "$SOURCE/serverpanel/cli.py" "$SOURCE/serverpanel/ui.py" "$SOURCE/packaging/config.json"; do
+for file in "$SOURCE/serverpanel/cli.py" "$SOURCE/serverpanel/ui.py"; do
     [[ -f "$file" ]] || { echo "Fichier manquant : $file" >&2; exit 1; }
 done
 TARGET=/opt/serverpanel
@@ -38,9 +47,10 @@ if [[ -e "$MOTD" ]] && ! grep -qF '# ServerPanel: source install' "$MOTD"; then
 fi
 printf '\nInstallation des dépendances via APT...\n'
 export DEBIAN_FRONTEND=noninteractive
-apt-get install -y python3 apache2 certbot python3-certbot-apache
+apt-get install -y python3 apache2 certbot python3-certbot-apache cron fastfetch
+systemctl enable --now cron >/dev/null 2>&1 || true
 
-install -d -m 0755 "$TARGET/serverpanel" /etc/serverpanel /usr/local/bin /etc/update-motd.d
+install -d -m 0755 "$TARGET/serverpanel" /etc/serverpanel /usr/local/bin /etc/update-motd.d /etc/cron.d
 for file in "$SOURCE"/serverpanel/*.py; do
     install -m 0644 "$file" "$TARGET/serverpanel/$(basename "$file")"
 done
@@ -49,9 +59,9 @@ for file in README.md SECURITY.md VALIDATION.md LICENSE; do
         install -m 0644 "$SOURCE/$file" "$TARGET/$file"
     fi
 done
-if [[ ! -e /etc/serverpanel/config.json ]]; then
-    install -m 0644 "$SOURCE/packaging/config.json" /etc/serverpanel/config.json
-fi
+# Configuration : créée une seule fois (favoris des services réellement
+# installés) ; un fichier existant n'est jamais modifié.
+PYTHONPATH="$TARGET" /usr/bin/python3 -c 'from serverpanel.common import ensure_config; ensure_config()'
 cat > "$LAUNCHER" <<'EOLAUNCH'
 #!/bin/sh
 # ServerPanel: source install
@@ -65,4 +75,4 @@ cat > "$MOTD" <<'EOMOTD'
 exec /usr/local/bin/panel motd
 EOMOTD
 chmod 0755 "$MOTD"
-printf '\nServerPanel installé depuis les sources.\nCommande : sudo panel\nSources Python : %s/serverpanel/\nConfiguration : /etc/serverpanel/config.json\n' "$TARGET"
+printf '\nServerPanel installé depuis les sources.\nCommande : sudo panel\nSources Python : %s/serverpanel/\nConfiguration : /etc/serverpanel/config.json\nCron : paquet cron installé, jobs gérés dans /etc/cron.d/serverpanel\n' "$TARGET"

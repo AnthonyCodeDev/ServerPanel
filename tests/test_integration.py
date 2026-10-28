@@ -149,9 +149,11 @@ class PackageIntegration(unittest.TestCase):
             self.skipTest('Build .deb before tests')
         p = subprocess.run(['dpkg-deb', '-c', str(deb)], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0)
-        for file in ('./usr/bin/panel', './etc/serverpanel/config.json',
+        for file in ('./usr/bin/panel',
                      './etc/update-motd.d/85-serverpanel', './usr/lib/serverpanel/serverpanel/ui.py'):
             self.assertIn(file, p.stdout)
+        # config.json n'est plus livré : il est créé à l'installation (postinst).
+        self.assertNotIn('./etc/serverpanel/config.json', p.stdout)
         with tempfile.TemporaryDirectory() as folder:
             subprocess.run(['dpkg-deb', '-x', str(deb), folder], check=True)
             app = Path(folder) / 'usr/lib/serverpanel/serverpanel'

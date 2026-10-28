@@ -10,15 +10,15 @@ panel \- terminal administration panel for Debian 13
 .SH DESCRIPTION
 .B panel
 is a keyboard-first terminal interface for systemd services, Apache
-VirtualHosts and host metrics. Interactive administration requires root.
-No web interface or extra network port is required.
+VirtualHosts, cron jobs and host metrics. Interactive administration
+requires root. No web interface or extra network port is required.
 .SH KEYS
 .TP
 .B LEFT / RIGHT
 Switch section; move between the actions of the selected item.
 .TP
 .B UP / DOWN
-Select a service, site or action.
+Select a service, site, cron job or action.
 .TP
 .B ENTER
 Focus the action pane, then run the selected action.
@@ -26,23 +26,68 @@ Focus the action pane, then run the selected action.
 .B TAB
 Move focus between the list and the actions.
 .TP
-.B 1 / 2 / 3
-Jump to SERVICES, VPS or SITES.
+.B 1 / 2 / 3 / 4
+Jump to VPS, SERVICES, SITES or CRON. The panel opens on VPS.
 .TP
 .B ESC
 Return to the list or close a dialog.
 .TP
 .B N
-Create a service or site, depending on the section.
+Create a service, site or cron job, depending on the section.
+.TP
+.B F
+Pin or unpin the selected service or cron job.
 .TP
 .B A
-Show all systemd units or only the followed ones.
+Show all systemd units or only the followed ones, or, in the CRON section,
+every cron instead of the managed jobs and favourites.
 .TP
 .B R
 Refresh inventories and metrics.
 .TP
 .B Q
 Quit.
+.SH CRON
+The CRON section lists every job found in
+.IR /etc/crontab ,
+.IR /etc/cron.d/* " and"
+.IR /var/spool/cron/crontabs/* ,
+plus the jobs managed by the panel. The default view shows the managed jobs
+and the favourites only: system crons that are not pinned are hidden.
+Press
+.B F
+to pin or unpin the selected job; favourites are marked with a star and set
+apart above a separator. Press
+.B A
+to switch to every cron, and again to return to the managed jobs and
+favourites. Managed jobs are stored in
+.I /etc/serverpanel/config.json
+under the
+.B crons
+key, and cron favourites under the
+.B pinned_crons
+key as
+.I panel:<slug>
+for a managed job or
+.I ext:<hash>
+for an external cron. Managed jobs are written to
+.IR /etc/cron.d/serverpanel ,
+which is regenerated on every change; manual edits of that file are
+overwritten. The assistant builds a schedule from daily, weekly, monthly,
+every N hours or every N minutes choices, or from a custom five-field cron
+expression. A managed job can be edited, run immediately, enabled/disabled,
+inspected through the CRON journal, or deleted. External crontabs are
+read-only: only information and journal actions are offered. They are hidden
+by default; press
+.B A
+to show them, then
+.B F
+to pin one and keep it in the favourite view. They are labelled from what
+identifies them: the file name for
+.IR /etc/cron.d/* ,
+the run-parts period for
+.I /etc/crontab
+lines (cron.daily, cron.weekly, ...), and the account for user crontabs.
 .SH FILES
 .I /etc/serverpanel/config.json
 .br
@@ -51,13 +96,21 @@ Quit.
 .I /etc/systemd/system/panel-*.service
 .br
 .I /etc/apache2/sites-available/panel-*.conf
+.br
+.I /etc/cron.d/serverpanel
 .SH SECURITY
 Application processes run under dedicated unprivileged system users.
-No administrative command is executed via a shell. Critical networking/SSH
+No administrative command is executed via a shell, except the immediate
+run of a cron job, which uses
+.B /bin/sh -c
+the same way cron does. Cron files written by the panel are root-only, and
+commands and schedules are validated. Critical networking/SSH
 units are protected from stop/disable operations. Use the system console for
 emergency maintenance. Always back up the server before large changes.
 .SH SEE ALSO
 .BR systemctl (1),
 .BR apache2ctl (8),
 .BR certbot (7),
-.BR journalctl (1)
+.BR journalctl (1),
+.BR cron (8),
+.BR crontab (5)

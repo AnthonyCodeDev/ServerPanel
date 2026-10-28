@@ -2,5 +2,10 @@
 set -e
 if [ "$1" = configure ]; then
     install -d -m 0755 /srv/apps /etc/serverpanel
+    # config.json : créé une seule fois (services réellement installés).
+    # Un fichier existant n'est jamais modifié ; l'échec ne bloque pas le paquet.
+    PYTHONPATH=/usr/lib/serverpanel /usr/bin/python3 -c 'from serverpanel.common import ensure_config; ensure_config()' || true
+    install -d -m 0755 /etc/cron.d
+    systemctl enable --now cron >/dev/null 2>&1 || true
 fi
 exit 0

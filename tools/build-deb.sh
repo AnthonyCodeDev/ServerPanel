@@ -6,13 +6,12 @@ mkdir -p "$OUT"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 install -d -m 0755 "$TMP/usr/lib/serverpanel/serverpanel" "$TMP/usr/bin" \
-    "$TMP/etc/serverpanel" "$TMP/etc/update-motd.d" "$TMP/usr/share/doc/serverpanel" "$TMP/usr/share/man/man1" "$TMP/DEBIAN"
+    "$TMP/etc/update-motd.d" "$TMP/usr/share/doc/serverpanel" "$TMP/usr/share/man/man1" "$TMP/DEBIAN"
 for file in "$HERE"/serverpanel/*.py; do
     install -m 0644 "$file" "$TMP/usr/lib/serverpanel/serverpanel/"
 done
 install -m 0755 "$HERE/packaging/panel" "$TMP/usr/bin/panel"
 install -m 0755 "$HERE/packaging/85-serverpanel" "$TMP/etc/update-motd.d/85-serverpanel"
-install -m 0644 "$HERE/packaging/config.json" "$TMP/etc/serverpanel/config.json"
 install -m 0644 "$HERE/README.md" "$TMP/usr/share/doc/serverpanel/README.md"
 gzip -n -9 -c "$HERE/packaging/man/panel.1" > "$TMP/usr/share/man/man1/panel.1.gz"
 install -m 0644 "$HERE/SECURITY.md" "$TMP/usr/share/doc/serverpanel/SECURITY.md"

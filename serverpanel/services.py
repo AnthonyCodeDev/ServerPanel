@@ -32,6 +32,7 @@ class Service:
     memory: int = 0
     custom_command: str = ''
     custom_folder: str = ''
+    custom_user: str = ''
 
     @property
     def managed(self) -> bool:
@@ -48,6 +49,24 @@ class Service:
 
 # ----------------------------------------------------------------- config helpers
 
+# Rapport de la dernière synchronisation config.json → systemd (consommé par l'UI).
+SYNC_MESSAGES: list[tuple[bool, str]] = []
+AUTOSTART_DEFAULT = True
+ACCOUNT = re.compile(r'^[a-z_][a-z0-9_-]{0,31}$')
+
+
+def _note(text: str, error: bool = False) -> None:
+    SYNC_MESSAGES.append((error, text))
+    del SYNC_MESSAGES[:-20]
+
+
+def take_sync_messages() -> list[tuple[bool, str]]:
+    """Return (and clear) the messages produced by the last config → systemd sync."""
+    global SYNC_MESSAGES
+    messages, SYNC_MESSAGES = SYNC_MESSAGES, []
+    return messages
+
+
 def custom_services() -> dict:
     """Return the dict of custom service metadata stored in config.json."""
     data = config()
@@ -55,13 +74,38 @@ def custom_services() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def save_custom_service(slug: str, command: str, folder: str) -> None:
-    """Persist custom service info to config.json (does NOT touch the .service file)."""
-    data = config()
-    if 'custom_services' not in data or not isinstance(data['custom_services'], dict):
-        data['custom_services'] = {}
-    data['custom_services'][slug] = {'command': command, 'folder': folder}
+def _write_config(data: dict) -> None:
     atomic_write(CONFIG, json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+
+
+def _flag(value, default: bool = True) -> bool:
+    """Boolean tolerant for hand-edited JSON (true/false, "oui"/"non", 0/1...)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() not in {'', '0', 'false', 'non', 'no', 'off', 'disabled'}
+
+
+def save_custom_service(slug: str, command: str, folder: str, **fields) -> None:
+    """Persist custom service info to config.json, keeping autostart/user/pinned."""
+    data = config()
+    customs = data.get('custom_services')
+    if not isinstance(customs, dict):
+        customs = {}
+    entry = customs.get(slug)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry['command'] = command
+    entry['folder'] = folder
+    for key, value in fields.items():
+        if value is not None:
+            entry[key] = value
+    customs[slug] = entry
+    data['custom_services'] = customs
+    _write_config(data)
 
 
 def delete_custom_service(slug: str) -> None:
@@ -71,7 +115,33 @@ def delete_custom_service(slug: str) -> None:
     if isinstance(customs, dict):
         customs.pop(slug, None)
         data['custom_services'] = customs
-        atomic_write(CONFIG, json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+        _write_config(data)
+
+
+def set_autostart(name: str, enabled: bool) -> None:
+    """Persist the boot state of a panel unit in config.json (source of truth).
+
+    System units are ignored: only panel-* units are described by the config.
+    """
+    root_only()
+    unit_name(name)
+    if not name.startswith('panel-'):
+        return
+    slug = name.removeprefix('panel-').removesuffix('.service')
+    data = config()
+    customs = data.get('custom_services')
+    if not isinstance(customs, dict):
+        customs = {}
+    entry = customs.get(slug)
+    if not isinstance(entry, dict):
+        # Unit created outside the panel: seed the entry from the .service file.
+        info = _parse_service_file(UNITS / name)
+        entry = {key: value for key, value in
+                 (('command', info['command']), ('folder', info['folder']), ('user', info['user'])) if value}
+    entry['autostart'] = bool(enabled)
+    customs[slug] = entry
+    data['custom_services'] = customs
+    _write_config(data)
 
 
 # ----------------------------------------------------------------- .service file parsing
@@ -100,78 +170,244 @@ def _parse_service_file(unit_path: Path) -> dict:
     return info
 
 
+def _service_folder(value: str) -> Path:
+    """Existing absolute directory (created automatically only under /srv/apps)."""
+    path = Path(value.strip())
+    if not path.is_absolute() or '..' in path.parts or any(c in str(path) for c in '\x00\r\n'):
+        raise PanelError('Chemin absolu requis (sans traversée)')
+    path = path.resolve()
+    if not path.exists():
+        if path != APPS and path.is_relative_to(APPS):
+            path.mkdir(parents=True, mode=0o755)
+        else:
+            raise PanelError(f'Dossier introuvable : {path}')
+    if not path.is_dir():
+        raise PanelError(f'Pas un dossier : {path}')
+    return path
+
+
+def _service_account(slug: str, directory: Path, entry: dict) -> str:
+    """Use the config "user", else a dedicated svc-<slug> account under /srv/apps."""
+    explicit = str(entry.get('user') or '').strip()
+    if explicit:
+        if not ACCOUNT.fullmatch(explicit):
+            raise PanelError(f'Utilisateur invalide : {explicit}')
+        try:
+            account = pwd.getpwnam(explicit)
+        except KeyError as exc:
+            raise PanelError(f'Utilisateur inexistant : {explicit}') from exc
+        if account.pw_uid == 0:
+            raise PanelError('Exécution sous root refusée')
+        return explicit
+    if directory == APPS or not directory.is_relative_to(APPS):
+        raise PanelError('Dossier hors /srv/apps : ajouter "user" (ex. "www-data")')
+    user = f'svc-{slug}'
+    try:
+        account = pwd.getpwnam(user)
+    except KeyError:
+        # User is deliberately not deleted on rollback: code may already use it.
+        run('useradd', '--system', '--user-group', '--home-dir', str(directory),
+            '--shell', '/usr/sbin/nologin', user)
+        account = pwd.getpwnam(user)
+    if account.pw_uid == 0:
+        raise PanelError('Lancement sous root refusé')
+    run('chown', '-R', f'{user}:{user}', str(directory))
+    run('chmod', '750', str(directory))
+    return user
+
+
+def _provision(slug: str, entry: dict) -> tuple[str, bool] | None:
+    """Create panel-<slug>.service from a config entry; never duplicates a unit.
+
+    Returns (unit name, autostart) when a unit was created, else None. Rewriting an
+    existing unit is handled by _sync_panel_to_config().
+    """
+    try:
+        slug = app_name(str(slug))
+    except PanelError as exc:
+        _note(f'Entrée « {slug} » ignorée : {exc}', error=True)
+        return None
+    name = f'panel-{slug}.service'
+    unit = UNITS / name
+    if unit.exists() or unit.is_symlink():
+        return None  # Déjà provisionné : aucun doublon
+    command = str(entry.get('command') or '').strip()
+    folder = str(entry.get('folder') or '').strip()
+    if not command or not folder:
+        _note(f'{slug} : "command" et "folder" requis pour créer le service', error=True)
+        return None
+    try:
+        argv = parse_command(command)
+        directory = _service_folder(folder)
+        user = _service_account(slug, directory, entry)
+        atomic_write(unit, unit_content(slug, argv, directory, user))
+        run('systemd-analyze', 'verify', str(unit), timeout=30)
+    except (PanelError, OSError) as exc:
+        try:
+            unit.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _note(f'{slug} : création impossible — {exc}', error=True)
+        return None
+    return name, _flag(entry.get('autostart'), AUTOSTART_DEFAULT)
+
+
 def _sync_panel_to_config() -> None:
     """
-    Config is the source of truth.
+    config.json is the single source of truth.
 
-    - panel-* service file exists but slug is missing from config → read the .service
-      file and register it in config (best-effort discovery).
-    - slug is present in config → rebuild the .service file from config so any manual
-      edit to config.json is applied to systemd automatically on next panel start.
+    1. entry in config, no unit on disk  → create panel-<slug>.service, enable it
+       when "autostart" is true, then start it (never a duplicate unit);
+    2. unit on disk + entry in config    → rewrite the unit from config (command,
+       folder and optional "user" win over the .service file);
+    3. unit on disk, no entry in config  → discovery: register the unit in config;
+    4. "pinned" / "autostart" in an entry → applied to systemd and to the canonical
+       top-level "pinned" list.
 
-    Only runs when the process is root (needs write access to /etc/systemd/system and
-    /etc/serverpanel/config.json).  All errors are silenced so a stale config never
-    prevents the inventory from loading.
+    Only runs as root (needs /etc/systemd/system and /etc/serverpanel/config.json).
+    Never raises: failures are reported through take_sync_messages().
     """
     if os.geteuid() != 0:
         return
+
+    # Never rewrite a config we could not parse: a hand-edit typo must not destroy it.
+    try:
+        raw_config = CONFIG.read_text(encoding='utf-8')
+    except OSError:
+        return
+    try:
+        data = json.loads(raw_config)
+    except ValueError:
+        _note('config.json invalide (JSON) : synchronisation ignorée', error=True)
+        return
+    if not isinstance(data, dict):
+        _note('config.json doit contenir un objet JSON : synchronisation ignorée', error=True)
+        return
+    customs = data.get('custom_services')
+    if not isinstance(customs, dict):
+        customs = {}
+    data['custom_services'] = customs
+    config_changed = False
+    daemon_reload_needed = False
+
+    # 1) config → missing units
+    created: list[tuple[str, bool]] = []
+    for slug, entry in list(customs.items()):
+        if isinstance(entry, dict):
+            result = _provision(str(slug), entry)
+            if result:
+                created.append(result)
+    if created:
+        try:
+            run('systemctl', 'daemon-reload')
+        except PanelError as exc:
+            _note(f'daemon-reload : {exc}', error=True)
+        for name, autostart in created:
+            if autostart:
+                try:
+                    run('systemctl', 'enable', name, timeout=30)
+                except PanelError as exc:
+                    _note(f'{name} : activation au boot impossible — {exc}', error=True)
+            try:
+                run('systemctl', 'start', name, timeout=30)
+            except PanelError as exc:
+                _note(f'{name} créé mais non démarré — {exc}', error=True)
+            else:
+                _note(f'{name} créé depuis la config et démarré')
+
+    # 2) / 3) units present on disk
     try:
         unit_files = [p for p in UNITS.glob('panel-*.service')
                       if p.is_file() and not p.is_symlink()]
     except OSError:
-        return
-
-    data = config()
-    customs = data.get('custom_services', {})
-    if not isinstance(customs, dict):
-        customs = {}
-
-    config_changed = False
-    daemon_reload_needed = False
+        unit_files = []
 
     for unit_path in unit_files:
         slug = unit_path.stem.removeprefix('panel-')
-        if slug not in customs:
-            # Service file exists but not tracked → read and register
+        entry = customs.get(slug)
+        if not isinstance(entry, dict):
+            # Unit exists but is not tracked → read and register it
             info = _parse_service_file(unit_path)
             if info.get('command') or info.get('folder'):
-                customs[slug] = {'command': info['command'], 'folder': info['folder']}
+                registered = {'command': info['command'], 'folder': info['folder']}
+                if info.get('user'):
+                    registered['user'] = info['user']
+                customs[slug] = registered
                 config_changed = True
-        else:
-            # Config is source of truth → rebuild .service file if content differs
-            entry = customs[slug]
-            stored_cmd = entry.get('command', '')
-            stored_folder = entry.get('folder', '')
-            if not stored_cmd or not stored_folder:
+            continue
+        stored_cmd = str(entry.get('command') or '')
+        stored_folder = str(entry.get('folder') or '')
+        if not stored_cmd or not stored_folder:
+            continue
+        # "user" from config wins; otherwise keep the account already in the unit
+        info = _parse_service_file(unit_path)
+        user = str(entry.get('user') or info.get('user') or f'svc-{slug}')
+        try:
+            argv = shlex.split(stored_cmd, posix=True)
+            if not argv:
                 continue
-            # Re-read current user from existing file (we never change the user)
-            info = _parse_service_file(unit_path)
-            user = info.get('user') or f'svc-{slug}'
+            binary = shutil.which(argv[0])
+            if binary:
+                argv[0] = str(Path(binary).resolve())
+            directory_path = Path(stored_folder.strip())
+            if not directory_path.is_absolute() or '..' in directory_path.parts:
+                continue
+            expected = unit_content(slug, argv, directory_path, user)
             try:
-                argv = shlex.split(stored_cmd, posix=True)
-                if not argv:
-                    continue
-                binary = shutil.which(argv[0])
-                if binary:
-                    argv[0] = str(Path(binary).resolve())
-                directory_path = Path(stored_folder.strip())
-                if not directory_path.is_absolute() or '..' in directory_path.parts:
-                    continue
-                expected = unit_content(slug, argv, directory_path, user)
-                try:
-                    actual = unit_path.read_text(encoding='utf-8')
-                except OSError:
-                    continue
-                if actual != expected:
-                    atomic_write(unit_path, expected)
-                    daemon_reload_needed = True
-            except Exception:
-                continue  # Never crash inventory on sync errors
+                actual = unit_path.read_text(encoding='utf-8')
+            except OSError:
+                continue
+            if actual != expected:
+                atomic_write(unit_path, expected)
+                daemon_reload_needed = True
+        except Exception:
+            continue  # Never crash inventory on sync errors
+
+    # 4a) "pinned" in an entry → canonical top-level "pinned" list
+    canonical = data.get('pinned')
+    canonical = [x for x in canonical if isinstance(x, str)] if isinstance(canonical, list) else []
+    before = list(canonical)
+    for slug, entry in customs.items():
+        if not isinstance(entry, dict) or 'pinned' not in entry:
+            continue
+        name = f'panel-{slug}'
+        if _flag(entry['pinned'], default=False):
+            if name not in canonical:
+                canonical.append(name)
+        elif name in canonical:
+            canonical.remove(name)
+    if canonical != before:
+        data['pinned'] = canonical[:30]
+        config_changed = True
+
+    # 4b) "autostart" in an entry → real enable/disable in systemd
+    for slug, entry in customs.items():
+        if not isinstance(entry, dict) or 'autostart' not in entry:
+            continue
+        name = f'panel-{slug}.service'
+        unit = UNITS / name
+        if not unit.is_file() or unit.is_symlink():
+            continue
+        wanted = _flag(entry['autostart'], AUTOSTART_DEFAULT)
+        try:
+            state = run('systemctl', 'is-enabled', name, timeout=15, check=False).split()
+        except PanelError:
+            continue
+        current = state[0] if state else ''
+        if wanted and current != 'enabled':
+            try:
+                run('systemctl', 'enable', name, timeout=30)
+            except PanelError as exc:
+                _note(f'{name} : activation au boot impossible — {exc}', error=True)
+        elif not wanted and current == 'enabled':
+            try:
+                run('systemctl', 'disable', name, timeout=30)
+            except PanelError as exc:
+                _note(f'{name} : désactivation au boot impossible — {exc}', error=True)
 
     if config_changed:
-        data['custom_services'] = customs
         try:
-            atomic_write(CONFIG, json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+            _write_config(data)
         except OSError:
             pass
 
@@ -205,9 +441,11 @@ def update_custom_service(slug: str, command: str, folder: str) -> None:
         if not raw_folder.is_absolute() or '..' in raw_folder.parts:
             raise PanelError('Chemin absolu requis')
         directory_path = raw_folder.resolve()
-        # Keep existing user so we don't change ownership unexpectedly
+        # "user" from config wins; otherwise keep the account already in the unit
         info = _parse_service_file(unit)
-        user = info.get('user') or f'svc-{slug}'
+        configured = custom_services().get(slug)
+        user = (str((configured or {}).get('user') or '')
+                or info.get('user') or f'svc-{slug}')
         content = unit_content(slug, argv, directory_path, user)
         atomic_write(unit, content)
         run('systemctl', 'daemon-reload')
@@ -273,7 +511,9 @@ def inventory(timeout: int = 12) -> list[Service]:
     result = []
     for n in names:
         slug = n.removeprefix('panel-').removesuffix('.service')
-        info = customs.get(slug, {})
+        info = customs.get(slug)
+        if not isinstance(info, dict):
+            info = {}
         svc = Service(
             n,
             active.get(n, ('inactive', ''))[0],
@@ -281,8 +521,9 @@ def inventory(timeout: int = 12) -> list[Service]:
             active.get(n, ('', ''))[1],
             meta.get(n, {}).get('FragmentPath', ''),
             _memory(meta.get(n, {}).get('MemoryCurrent', '')),
-            info.get('command', ''),
-            info.get('folder', ''),
+            str(info.get('command') or ''),
+            str(info.get('folder') or ''),
+            str(info.get('user') or ''),
         )
         result.append(svc)
     return result
@@ -405,7 +646,7 @@ def create(slug: str, command: str, directory: str, autostart: bool = True) -> s
         run('systemctl', 'daemon-reload', check=False)
         raise
     # Persist custom service metadata (service is registered, keep even if start fails)
-    save_custom_service(slug, command, str(directory_path))
+    save_custom_service(slug, command, str(directory_path), user=user, autostart=autostart)
     # Phase 2: first start — failure is a runtime issue, not a creation error
     try:
         run('systemctl', 'start', name, timeout=50)

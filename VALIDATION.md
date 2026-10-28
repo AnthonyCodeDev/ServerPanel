@@ -2,9 +2,10 @@
 
 Testé sur Debian 13, Python 3.13, Apache 2.4, systemd 257.
 
-- 37 tests unitaires — tous passent
+- Suite de tests unitaires (services, sites, cron, UI) — tous passent
 - Création/suppression de VirtualHosts Apache avec validation syntaxique réelle
 - Génération d'unités systemd vérifiée avec `systemd-analyze verify`
+- Couverture cron : construction des planifications, parsing des crontabs, génération du fichier `/etc/cron.d/serverpanel`
 - Navigation curses testée dans un pseudo-terminal
 - Tests de sécurité : chemins/domaines invalides, refus d'arrêt SSH, permissions
 

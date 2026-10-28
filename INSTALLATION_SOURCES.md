@@ -13,7 +13,7 @@ bash install.sh
 panel
 ```
 
-Les modules sont copiés dans `/opt/serverpanel/`, la commande `panel` dans `/usr/local/bin/`.
+Les modules sont copiés dans `/opt/serverpanel/`, la commande `panel` dans `/usr/local/bin/`. `install.sh` installe et active `cron` automatiquement.
 
 ## Modifier le code
 
@@ -25,7 +25,7 @@ bash /root/ServerPanel_sources_debian13/install.sh
 panel
 ```
 
-`install.sh` ne touche pas à `/etc/serverpanel/config.json`.
+`install.sh` crée `/etc/serverpanel/config.json` s'il n'existe pas, avec les favoris des services réellement installés ; un fichier existant n'est jamais modifié.
 
 ## Lancer les tests
 

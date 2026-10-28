@@ -4,7 +4,7 @@ Section: admin
 Priority: optional
 Architecture: all
 Maintainer: ServerPanel Project <noreply@example.invalid>
-Depends: python3 (>= 3.11), systemd, apache2, certbot, python3-certbot-apache
+Depends: python3 (>= 3.11), systemd, cron, apache2, certbot, python3-certbot-apache, fastfetch
 Recommends: sudo
 Description: Keyboard-first terminal administration for Debian 13
  A dependency-light curses terminal panel for systemd services, managed
