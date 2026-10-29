@@ -1,8 +1,6 @@
 # ServerPanel 1.0 beta
 
-Interface TUI pour gérer services systemd, sites Apache et crons, et voir l'état du VPS — depuis SSH, au clavier, sur Debian 13.
-
-Pas de bibliothèque externe, pas d'API, pas de port supplémentaire.
+Interface TUI pour gérer services systemd, sites Apache et crons, et voir l'état du VPS.
 
 ## Installation
 
